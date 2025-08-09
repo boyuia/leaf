@@ -4,76 +4,18 @@ from torch.nn import functional as F
 import json
 import os
 
-# --- Hyperparameters (same as before) ---
+# --- Model Hyperparameters ---
+# These must match the hyperparameters used during training.
 batch_size = 32
 block_size = 8
-max_iters = 3000
-eval_interval = 300
-learning_rate = 1e-2
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-eval_iters = 200
 n_embd = 32
 n_head = 4
 n_layer = 4
 dropout = 0.0
 
-# --- Data Preparation (same as before) ---
-file_path = 'dataset.jsonl'
-corpus = ""
-try:
-    with open(file_path, 'r') as f:
-        for line in f:
-            data_point = json.loads(line)
-            corpus += data_point['header'] + '\n' + data_point['formal_statement'] + '\n'
-except FileNotFoundError:
-    print(f"Error: The file '{file_path}' was not found.")
-    exit()
-except json.JSONDecodeError:
-    print(f"Error: There was a problem parsing a line in '{file_path}'.")
-    exit()
-except KeyError:
-    print(f"Error: A line in '{file_path}' does not have the expected keys.")
-    exit()
-
-if not corpus:
-    print("Error: The corpus is empty.")
-    exit()
-
-chars = sorted(list(set(corpus)))
-vocab_size = len(chars)
-stoi = {ch: i for i, ch in enumerate(chars)}
-itos = {i: ch for i, ch in enumerate(chars)}
-# Corrected the encode function
-encode = lambda s: [stoi[c] for c in s]
-decode = lambda l: ''.join([itos[i] for i in l])
-data = torch.tensor(encode(corpus), dtype=torch.long)
-n = int(0.9 * len(data))
-train_data = data[:n]
-val_data = data[n:]
-
-def get_batch(split):
-    data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i + block_size] for i in ix])
-    y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
-    x, y = x.to(device), y.to(device)
-    return x, y
-
-@torch.no_grad()
-def estimate_loss():
-    out = {}
-    model.eval()
-    for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            X, Y = get_batch(split)
-            logits, loss = model(X, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
-    model.train()
-    return out
-
-# --- Model Definition (same as before) ---
+# --- Model Definition ---
+# The model architecture must be defined here so that `torch.load` knows
+# how to reconstruct the model from the saved state dictionary.
 class Head(nn.Module):
     def __init__(self, head_size):
         super().__init__()
@@ -140,7 +82,6 @@ class LanguageModel(nn.Module):
         self.lm_head = nn.Linear(n_embd, vocab_size)
         self.block_size = block_size
         self.vocab_size = vocab_size
-
     def forward(self, idx, targets=None):
         B, T = idx.shape
         tok_emb = self.token_embedding_table(idx)
@@ -156,7 +97,6 @@ class LanguageModel(nn.Module):
             targets = targets.view(B * T)
             loss = F.cross_entropy(logits, targets)
         return logits, loss
-
     def generate(self, idx, max_new_tokens):
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -self.block_size:]
@@ -167,22 +107,67 @@ class LanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
         return idx
 
+# --- Utility functions and model loading ---
+# Read the dataset to create the vocabulary, which must match the model's vocabulary
+file_path = 'dataset.jsonl'
+corpus = ""
+try:
+    with open(file_path, 'r') as f:
+        for line in f:
+            data_point = json.loads(line)
+            corpus += data_point['header'] + '\n' + data_point['formal_statement'] + '\n'
+except FileNotFoundError:
+    print(f"Error: The file '{file_path}' was not found. Cannot create vocabulary.")
+    exit()
+except (json.JSONDecodeError, KeyError):
+    print(f"Error: There was a problem parsing a line in '{file_path}'.")
+    exit()
 
-# --- Training and Generation ---
+if not corpus:
+    print("Error: The corpus is empty.")
+    exit()
+
+chars = sorted(list(set(corpus)))
+vocab_size = len(chars)
+stoi = {ch: i for i, ch in enumerate(chars)}
+itos = {i: ch for i, ch in enumerate(chars)}
+encode = lambda s: [stoi.get(c, 0) for c in s]
+decode = lambda l: ''.join([itos[i] for i in l])
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# Load the trained model
 model = LanguageModel(vocab_size, block_size, n_embd, n_head, n_layer, dropout)
-m = model.to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+model_file = 'model.pt'
+if not os.path.exists(model_file):
+    print(f"Error: The model file '{model_file}' was not found.")
+    exit()
 
-for iter in range(max_iters):
-    if iter % eval_interval == 0:
-        losses = estimate_loss()
-        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-    xb, yb = get_batch('train')
-    logits, loss = model(xb, yb)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
+try:
+    model.load_state_dict(torch.load(model_file, map_location=device))
+    model.eval()  # Set the model to evaluation mode
+    model.to(device)
+    print("Model loaded successfully. Type a message to chat with the model (or 'exit' to quit).")
+except RuntimeError as e:
+    print(f"Error: A problem occurred while loading the model state dictionary: {e}")
+    print("This may be due to a vocabulary mismatch. Please ensure you have a `model.pt` file trained with the current `dataset.jsonl`.")
+    exit()
 
-# Save the model's state dictionary after training
-torch.save(m.state_dict(), 'model.pt')
-print("Model saved to model.pt")
+# --- Terminal Chat Loop ---
+while True:
+    try:
+        user_input = input("You: ")
+        if user_input.lower() == 'exit':
+            break
+
+        # Encode the user's input
+        context = torch.tensor(encode(user_input), dtype=torch.long, device=device).unsqueeze(0)
+        
+        # Generate new text
+        generated_text_indices = model.generate(context, max_new_tokens=50)
+        generated_text = decode(generated_text_indices[0].tolist())
+
+        # Print the model's response
+        print(f"Model: {generated_text[len(user_input):]}")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        continue
